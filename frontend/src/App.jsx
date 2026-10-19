@@ -308,7 +308,7 @@ export default function App() {
               </li>
               <li>
                 <strong>Queue</strong>
-                <span>Batch jobs run through bounded background workers.</span>
+                <span>Batch jobs are processed inline and stored in shared state for polling.</span>
               </li>
               <li>
                 <strong>Rate limit</strong>

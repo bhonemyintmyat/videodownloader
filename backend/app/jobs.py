@@ -1,10 +1,9 @@
-import asyncio
 import secrets
-from collections import OrderedDict
-from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from dataclasses import dataclass
+from datetime import datetime, timezone
 
-from .cache import TTLCache
+from pydantic import ValidationError
+
 from .delivery import build_delivery_url
 from .extraction import ExtractionUnavailable, MediaResolver
 from .models import (
@@ -16,15 +15,8 @@ from .models import (
     MediaAsset,
 )
 from .settings import Settings
+from .state import StateBackend
 from .url_validation import ValidatedUrl
-
-
-class QueueFullError(Exception):
-    pass
-
-
-class NoSupportedUrlsError(Exception):
-    pass
 
 
 @dataclass(frozen=True)
@@ -34,44 +26,18 @@ class SubmittedUrl:
     error: ErrorDetail | None
 
 
-@dataclass
-class _JobRecord:
-    job: DownloadJob
-    parsed_urls: list[ValidatedUrl | None] = field(default_factory=list)
-
-
-class DownloadQueue:
+class DownloadService:
     def __init__(
         self,
         resolver: MediaResolver,
-        cache: TTLCache[str, MediaAsset],
+        state: StateBackend,
         settings: Settings,
     ):
         self._resolver = resolver
-        self._cache = cache
+        self._state = state
         self._settings = settings
-        self._queue: asyncio.Queue[str] = asyncio.Queue(maxsize=settings.queue_max_size)
-        self._records: OrderedDict[str, _JobRecord] = OrderedDict()
-        self._tasks: list[asyncio.Task[None]] = []
 
-    async def start(self) -> None:
-        if self._tasks:
-            return
-        for index in range(self._settings.queue_workers):
-            self._tasks.append(asyncio.create_task(self._worker(), name=f"download-worker-{index}"))
-
-    async def stop(self) -> None:
-        for task in self._tasks:
-            task.cancel()
-        await asyncio.gather(*self._tasks, return_exceptions=True)
-        self._tasks.clear()
-
-    def submit(self, urls: list[SubmittedUrl]) -> DownloadJob:
-        self._prune_jobs()
-        supported = [item for item in urls if item.parsed is not None and item.parsed.supported]
-        if not supported:
-            raise NoSupportedUrlsError()
-
+    async def submit(self, urls: list[SubmittedUrl]) -> DownloadJob:
         now = datetime.now(timezone.utc)
         job = DownloadJob(
             id=secrets.token_urlsafe(18),
@@ -109,54 +75,48 @@ class DownloadQueue:
             job.items.append(DownloadItem(url=submitted.raw_url))
             parsed_urls.append(submitted.parsed)
 
-        record = _JobRecord(job=job, parsed_urls=parsed_urls)
-        self._records[job.id] = record
-
-        try:
-            self._queue.put_nowait(job.id)
-        except asyncio.QueueFull:
-            del self._records[job.id]
-            raise QueueFullError() from None
-
-        self._prune_jobs()
+        await self._process(job, parsed_urls)
+        await self._state.job_save(
+            job.id,
+            job.model_dump_json(),
+            self._settings.job_ttl_seconds,
+        )
         return job.model_copy(deep=True)
 
-    def get(self, job_id: str) -> DownloadJob | None:
-        self._prune_jobs()
-        record = self._records.get(job_id)
-        if record is None:
+    async def get(self, job_id: str) -> DownloadJob | None:
+        raw = await self._state.job_get(job_id)
+        if raw is None:
             return None
-        return record.job.model_copy(deep=True)
+        try:
+            return DownloadJob.model_validate_json(raw)
+        except ValidationError:
+            return None
 
-    def get_cached_media(self, provider_id: str, media_id: str) -> MediaAsset | None:
-        return self._cache.get(f"{provider_id}:{media_id}")
+    async def get_cached_media(self, provider_id: str, media_id: str) -> MediaAsset | None:
+        raw = await self._state.cache_get(f"{provider_id}:{media_id}")
+        if raw is None:
+            return None
+        try:
+            return MediaAsset.model_validate_json(raw)
+        except ValidationError:
+            return None
 
-    async def _worker(self) -> None:
-        while True:
-            job_id = await self._queue.get()
-            try:
-                record = self._records.get(job_id)
-                if record is not None:
-                    await self._process(record)
-            finally:
-                self._queue.task_done()
+    async def _process(self, job: DownloadJob, parsed_urls: list[ValidatedUrl | None]) -> None:
+        job.status = JobStatus.PROCESSING
+        job.updated_at = datetime.now(timezone.utc)
 
-    async def _process(self, record: _JobRecord) -> None:
-        record.job.status = JobStatus.PROCESSING
-        record.job.updated_at = datetime.now(timezone.utc)
-
-        for index, item in enumerate(record.job.items):
+        for index, item in enumerate(job.items):
             if item.status != DownloadItemStatus.QUEUED:
                 continue
 
-            parsed = record.parsed_urls[index]
+            parsed = parsed_urls[index]
             if parsed is None or parsed.provider is None or parsed.content_id is None:
                 item.status = DownloadItemStatus.FAILED
                 item.error = ErrorDetail(code="unsupported_url", message="Unsupported URL.")
                 continue
 
             cache_key = f"{parsed.provider.id}:{parsed.content_id}"
-            cached = self._cache.get(cache_key)
+            cached = await self._cached_asset(cache_key)
             if cached is not None:
                 self._complete_item(item, cached, cache_hit=True)
                 continue
@@ -183,19 +143,32 @@ class DownloadQueue:
                 )
                 continue
 
-            self._cache.set(cache_key, asset)
+            await self._state.cache_set(
+                cache_key,
+                asset.model_dump_json(),
+                self._settings.cache_ttl_seconds,
+            )
             self._complete_item(item, asset, cache_hit=False)
 
-        statuses = [item.status for item in record.job.items]
+        statuses = [item.status for item in job.items]
         if statuses and all(status == DownloadItemStatus.COMPLETED for status in statuses):
-            record.job.status = JobStatus.COMPLETED
+            job.status = JobStatus.COMPLETED
         elif statuses and all(status == DownloadItemStatus.FAILED for status in statuses):
-            record.job.status = JobStatus.FAILED
+            job.status = JobStatus.FAILED
         elif any(status == DownloadItemStatus.COMPLETED for status in statuses):
-            record.job.status = JobStatus.PARTIAL
+            job.status = JobStatus.PARTIAL
         else:
-            record.job.status = JobStatus.FAILED
-        record.job.updated_at = datetime.now(timezone.utc)
+            job.status = JobStatus.FAILED
+        job.updated_at = datetime.now(timezone.utc)
+
+    async def _cached_asset(self, cache_key: str) -> MediaAsset | None:
+        raw = await self._state.cache_get(cache_key)
+        if raw is None:
+            return None
+        try:
+            return MediaAsset.model_validate_json(raw)
+        except ValidationError:
+            return None
 
     def _complete_item(self, item: DownloadItem, asset: MediaAsset, cache_hit: bool) -> None:
         item.status = DownloadItemStatus.COMPLETED
@@ -203,25 +176,3 @@ class DownloadQueue:
         item.delivery_url = build_delivery_url(asset, self._settings.cdn_base_url)
         item.cache_hit = cache_hit
         item.error = None
-
-    def _prune_jobs(self) -> None:
-        now = datetime.now(timezone.utc)
-        ttl = timedelta(seconds=self._settings.job_ttl_seconds)
-        terminal = {JobStatus.COMPLETED, JobStatus.PARTIAL, JobStatus.FAILED}
-
-        for job_id, record in list(self._records.items()):
-            if record.job.status in terminal and now - record.job.updated_at > ttl:
-                del self._records[job_id]
-
-        while len(self._records) > self._settings.queue_max_jobs:
-            removable = next(
-                (
-                    job_id
-                    for job_id, record in self._records.items()
-                    if record.job.status in terminal
-                ),
-                None,
-            )
-            if removable is None:
-                break
-            del self._records[removable]

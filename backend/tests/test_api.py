@@ -51,6 +51,14 @@ def test_health_and_providers():
         assert providers == [{"id": "x", "name": "X (Twitter)"}]
 
 
+def test_api_docs_are_mounted_under_api_prefix():
+    with TestClient(create_app(_settings())) as client:
+        schema = client.get("/api/openapi.json")
+        assert schema.status_code == 200
+        assert "/api/validate" in schema.json()["paths"]
+        assert client.get("/api/docs").status_code == 200
+
+
 def test_validate_endpoint_accepts_x_status():
     with TestClient(create_app(_settings())) as client:
         response = client.post(

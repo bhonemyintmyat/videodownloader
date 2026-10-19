@@ -5,22 +5,20 @@ from ipaddress import ip_address
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.responses import JSONResponse, RedirectResponse
 
-from .cache import TTLCache
 from .delivery import build_delivery_url
 from .extraction import MediaResolver, UnavailableResolver
-from .jobs import DownloadQueue, NoSupportedUrlsError, QueueFullError, SubmittedUrl
+from .jobs import DownloadService, SubmittedUrl
 from .models import (
     DownloadJob,
     DownloadRequest,
     ErrorDetail,
-    MediaAsset,
     Provider,
     UrlValidationRequest,
     ValidationResponse,
 )
 from .providers import PROVIDERS, get_provider
-from .rate_limit import TokenBucketRateLimiter
 from .settings import Settings
+from .state import StateBackendError, create_state
 from .url_validation import UrlValidationError, validate_video_url
 
 
@@ -66,29 +64,39 @@ def create_app(
 ) -> FastAPI:
     settings = settings or Settings.from_env()
     resolver = resolver or UnavailableResolver()
-    media_cache: TTLCache[str, MediaAsset] = TTLCache(
-        max_entries=settings.cache_max_entries,
-        ttl_seconds=settings.cache_ttl_seconds,
-    )
-    download_queue = DownloadQueue(resolver=resolver, cache=media_cache, settings=settings)
-    rate_limiter = TokenBucketRateLimiter(
-        per_minute=settings.rate_limit_per_minute,
-        burst=settings.rate_limit_burst,
-        max_keys=settings.rate_limit_max_keys,
-    )
+    state = create_state(settings)
+    download_service = DownloadService(resolver=resolver, state=state, settings=settings)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        await download_queue.start()
         try:
             yield
         finally:
-            await download_queue.stop()
+            await state.close()
 
-    app = FastAPI(title="VideoSaver API", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(
+        title="VideoSaver API",
+        version="0.1.0",
+        lifespan=lifespan,
+        docs_url="/api/docs",
+        redoc_url=None,
+        openapi_url="/api/openapi.json",
+    )
     app.state.settings = settings
-    app.state.download_queue = download_queue
-    app.state.media_cache = media_cache
+    app.state.state = state
+    app.state.download_service = download_service
+
+    @app.exception_handler(StateBackendError)
+    async def state_backend_error_handler(request: Request, exc: StateBackendError) -> JSONResponse:
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            content={
+                "detail": {
+                    "code": "state_unavailable",
+                    "message": "The download service is temporarily unavailable.",
+                }
+            },
+        )
 
     @app.middleware("http")
     async def enforce_rate_limit(request: Request, call_next):
@@ -96,7 +104,7 @@ def create_app(
         if not path.startswith("/api") or path == "/api/health":
             return await call_next(request)
 
-        decision = rate_limiter.check(_client_key(request, settings.trust_proxy_headers))
+        decision = await state.rate_limit(_client_key(request, settings.trust_proxy_headers))
         limit_headers = {
             "X-RateLimit-Limit": str(decision.limit),
             "X-RateLimit-Remaining": str(decision.remaining),
@@ -171,24 +179,11 @@ def create_app(
                 "No supported X video URLs were provided.",
             )
 
-        try:
-            return download_queue.submit(submitted)
-        except QueueFullError as exc:
-            raise _http_error(
-                status.HTTP_503_SERVICE_UNAVAILABLE,
-                "queue_full",
-                "The download queue is full. Try again shortly.",
-            ) from exc
-        except NoSupportedUrlsError as exc:
-            raise _http_error(
-                status.HTTP_400_BAD_REQUEST,
-                "no_supported_urls",
-                "No supported X video URLs were provided.",
-            ) from exc
+        return await download_service.submit(submitted)
 
     @app.get("/api/downloads/{job_id}", response_model=DownloadJob)
     async def get_download(job_id: str) -> DownloadJob:
-        job = download_queue.get(job_id)
+        job = await download_service.get(job_id)
         if job is None:
             raise _http_error(
                 status.HTTP_404_NOT_FOUND,
@@ -206,7 +201,7 @@ def create_app(
                 "The media file was not found.",
             )
 
-        asset = download_queue.get_cached_media(provider_id, media_id)
+        asset = await download_service.get_cached_media(provider_id, media_id)
         if asset is None:
             raise _http_error(
                 status.HTTP_404_NOT_FOUND,

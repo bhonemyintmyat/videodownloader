@@ -35,10 +35,11 @@ class TTLCache(Generic[K, V]):
             self._items.move_to_end(key)
             return value
 
-    def set(self, key: K, value: V) -> None:
+    def set(self, key: K, value: V, ttl_seconds: float | None = None) -> None:
         now = self._clock()
+        ttl = self._ttl_seconds if ttl_seconds is None else max(0.0, ttl_seconds)
         with self._lock:
-            self._items[key] = (now + self._ttl_seconds, value)
+            self._items[key] = (now + ttl, value)
             self._items.move_to_end(key)
             while len(self._items) > self._max_entries:
                 self._items.popitem(last=False)
