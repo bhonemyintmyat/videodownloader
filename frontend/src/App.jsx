@@ -262,36 +262,6 @@ export default function App() {
               </div>
             )}
           </section>
-
-          <section className="panel">
-            <div className="panel-heading">
-              <div>
-                <p className="eyebrow">Batch</p>
-                <h2>Queue multiple links</h2>
-              </div>
-              <span className="hint">One URL per line</span>
-            </div>
-
-            <form className="stack" onSubmit={handleBatchSubmit}>
-              <label className="field">
-                <span>Video URLs</span>
-                <textarea
-                  rows={7}
-                  value={batchText}
-                  onChange={(event) => setBatchText(event.target.value)}
-                  placeholder={
-                    "https://x.com/creator/status/123\nhttps://x.com/creator/status/456"
-                  }
-                  spellCheck="false"
-                />
-              </label>
-              <button className="primary-button" type="submit" disabled={submitting}>
-                {submitting ? "Queueing..." : "Queue batch"}
-              </button>
-            </form>
-
-            {batchError && <p className="alert">{batchError}</p>}
-          </section>
         </div>
 
         <div className="column">
