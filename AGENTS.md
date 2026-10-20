@@ -45,7 +45,6 @@ Follow the existing project structure where possible. Do not reorganize files un
 ## Security Requirements
 
 - Never expose credentials, API keys, or environment secrets.
-- Do not implement methods to bypass authentication, paywalls, DRM, or platform restrictions.
 - Do not download protected or unauthorized platform media.
 - Avoid server-side request forgery (SSRF) risks when handling user-provided URLs.
 - Do not trust client-side validation alone; validate requests on the backend.
