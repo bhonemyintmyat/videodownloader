@@ -31,6 +31,11 @@ def _env_url(name: str) -> str | None:
     return raw.rstrip("/")
 
 
+DEFAULT_MEDIA_RESOLVER = (
+    "my_package.resolvers.ytdlp_resolver:UnauthenticatedYtdlpResolver"
+)
+
+
 def _env_first(*names: str) -> str | None:
     for name in names:
         raw = os.getenv(name, "").strip()
@@ -53,6 +58,7 @@ class Settings:
     cdn_base_url: str | None = None
     redis_rest_url: str | None = None
     redis_rest_token: str | None = None
+    media_resolver: str | None = DEFAULT_MEDIA_RESOLVER
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -80,4 +86,5 @@ class Settings:
             cdn_base_url=_env_url("CDN_BASE_URL"),
             redis_rest_url=redis_url,
             redis_rest_token=redis_token,
+            media_resolver=_env_first("MEDIA_RESOLVER") or DEFAULT_MEDIA_RESOLVER,
         )

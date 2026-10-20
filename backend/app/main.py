@@ -6,7 +6,7 @@ from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.responses import JSONResponse, RedirectResponse
 
 from .delivery import build_delivery_url
-from .extraction import MediaResolver, UnavailableResolver
+from .extraction import MediaResolver, UnavailableResolver, load_resolver
 from .jobs import DownloadService, SubmittedUrl
 from .models import (
     DownloadJob,
@@ -63,7 +63,7 @@ def create_app(
     resolver: MediaResolver | None = None,
 ) -> FastAPI:
     settings = settings or Settings.from_env()
-    resolver = resolver or UnavailableResolver()
+    resolver = resolver or load_resolver(settings.media_resolver) or UnavailableResolver()
     state = create_state(settings)
     download_service = DownloadService(resolver=resolver, state=state, settings=settings)
 

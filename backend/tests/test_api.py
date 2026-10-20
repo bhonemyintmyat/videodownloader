@@ -2,6 +2,7 @@ import time
 
 from fastapi.testclient import TestClient
 
+from app.extraction import UnavailableResolver
 from app.main import create_app
 from app.models import MediaAsset
 from app.settings import Settings
@@ -139,8 +140,8 @@ def test_cdn_delivery_url_is_used_when_configured():
         assert redirect.headers["location"] == "https://cdn.example.com/media/x/456"
 
 
-def test_default_resolver_reports_extraction_unavailable():
-    with TestClient(create_app(_settings())) as client:
+def test_unavailable_resolver_reports_extraction_unavailable():
+    with TestClient(create_app(_settings(), resolver=UnavailableResolver())) as client:
         response = client.post(
             "/api/downloads",
             json={"urls": ["https://x.com/opencode/status/789"]},

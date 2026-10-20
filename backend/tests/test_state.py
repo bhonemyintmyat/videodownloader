@@ -6,6 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import app.main as main_module
+from app.extraction import UnavailableResolver
 from app.main import create_app
 from app.settings import Settings
 from app.state import MemoryState, RedisState, StateBackendError, create_state
@@ -161,7 +162,7 @@ def test_redis_state_fails_open_for_rate_limit_but_raises_for_jobs():
 def test_state_backend_failure_returns_service_unavailable(monkeypatch):
     monkeypatch.setattr(main_module, "create_state", lambda settings: _BrokenState())
 
-    with TestClient(create_app(_settings())) as client:
+    with TestClient(create_app(_settings(), resolver=UnavailableResolver())) as client:
         response = client.post(
             "/api/downloads",
             json={"urls": ["https://x.com/opencode/status/123"]},

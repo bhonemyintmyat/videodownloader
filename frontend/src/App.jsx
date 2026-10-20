@@ -320,8 +320,8 @@ export default function App() {
               </li>
             </ul>
             <p className="compliance-note">
-              Media extraction requires an authorized resolver. Scraping and protection
-              bypass are intentionally not included.
+              Media extraction uses the configured MEDIA_RESOLVER. The default adapter is
+              unauthenticated yt-dlp. Download only content you are authorized to access.
             </p>
           </section>
         </div>
