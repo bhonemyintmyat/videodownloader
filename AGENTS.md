@@ -65,3 +65,11 @@ Follow the existing project structure where possible. Do not reorganize files un
 - Do not assume commands or dependencies exist; inspect the project configuration first.
 - Document any new dependencies and setup requirements.
 - Never claim that code or tests work unless they have been checked.
+
+## For UnavailableResolver
+
+- Implement au unauthenticated yt-dlp resolver.
+
+- point the environment variable to this class path: MEDIA_RESOLVER=my_package.resolvers.ytdlp_resolver:UnauthenticatedYtdlpResolver
+
+
