@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from pydantic import ValidationError
 
 from .delivery import build_delivery_url
-from .extraction import ExtractionUnavailable, MediaResolver
+from .extraction import ExtractionError, ExtractionUnavailable, MediaResolver
 from .models import (
     DownloadItem,
     DownloadItemStatus,
@@ -13,6 +13,7 @@ from .models import (
     ErrorDetail,
     JobStatus,
     MediaAsset,
+    MediaDetails,
 )
 from .settings import Settings
 from .state import StateBackend
@@ -103,6 +104,41 @@ class DownloadService:
             return MediaAsset.model_validate_json(raw)
         except ValidationError:
             return None
+
+    async def get_cached_details(
+        self,
+        provider_id: str,
+        media_id: str,
+    ) -> MediaDetails | None:
+        raw = await self._state.cache_get(f"details:{provider_id}:{media_id}")
+        if raw is None:
+            return None
+        try:
+            return MediaDetails.model_validate_json(raw)
+        except ValidationError:
+            return None
+
+    async def inspect(self, url: ValidatedUrl) -> tuple[MediaDetails, bool]:
+        if url.provider is None or url.content_id is None:
+            raise ExtractionError("unsupported_url", "Unsupported URL.")
+
+        details = await self.get_cached_details(url.provider.id, url.content_id)
+        if details is not None:
+            return details, True
+
+        details = await self._resolver.inspect(url)
+        if details.provider != url.provider.id or details.id != url.content_id:
+            raise ExtractionError(
+                "invalid_media_result",
+                "The media resolver returned unexpected details.",
+            )
+
+        await self._state.cache_set(
+            f"details:{details.provider}:{details.id}",
+            details.model_dump_json(),
+            self._settings.cache_ttl_seconds,
+        )
+        return details, False
 
     async def _process(self, job: DownloadJob, parsed_urls: list[ValidatedUrl | None]) -> None:
         job.status = JobStatus.PROCESSING

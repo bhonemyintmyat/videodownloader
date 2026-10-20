@@ -2,11 +2,17 @@ import re
 from contextlib import asynccontextmanager
 from ipaddress import ip_address
 
-from fastapi import FastAPI, HTTPException, Request, status
+from fastapi import FastAPI, HTTPException, Query, Request, status
 from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 
 from .delivery import build_delivery_url
-from .extraction import MediaResolver, UnavailableResolver, load_resolver
+from .extraction import (
+    ExtractionError,
+    ExtractionUnavailable,
+    MediaResolver,
+    UnavailableResolver,
+    load_resolver,
+)
 from .jobs import DownloadService, SubmittedUrl
 from .media_proxy import MediaProxyError, open_media_stream
 from .models import (
@@ -14,6 +20,11 @@ from .models import (
     DownloadJob,
     DownloadRequest,
     ErrorDetail,
+    MediaAsset,
+    MediaDetails,
+    MediaDetailsResponse,
+    MediaFormat,
+    MediaFormatOption,
     Provider,
     UrlValidationRequest,
     ValidationResponse,
@@ -58,6 +69,47 @@ def _client_key(request: Request, trust_proxy_headers: bool) -> str:
 
 def _http_error(status_code: int, code: str, message: str) -> HTTPException:
     return HTTPException(status_code=status_code, detail={"code": code, "message": message})
+
+
+def _extraction_http_error(exc: ExtractionError) -> HTTPException:
+    if isinstance(exc, ExtractionUnavailable):
+        return _http_error(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            exc.code,
+            exc.message,
+        )
+    return _http_error(status.HTTP_502_BAD_GATEWAY, exc.code, exc.message)
+
+
+def _details_response(details: MediaDetails, cache_hit: bool) -> MediaDetailsResponse:
+    provider = get_provider(details.provider)
+    return MediaDetailsResponse(
+        id=details.id,
+        provider=details.provider,
+        provider_name=provider.name if provider is not None else details.provider,
+        title=details.title,
+        source_url=details.source_url,
+        thumbnail_url=details.thumbnail_url,
+        duration_seconds=details.duration_seconds,
+        cache_hit=cache_hit,
+        formats=[
+            MediaFormatOption(
+                id=item.id,
+                label=item.label,
+                content_type=item.content_type,
+                width=item.width,
+                height=item.height,
+                size_bytes=item.size_bytes,
+            )
+            for item in details.formats
+        ],
+    )
+
+
+def _selected_format(details: MediaDetails, format_id: str | None) -> MediaFormat | None:
+    if format_id is None:
+        return details.formats[0] if details.formats else None
+    return next((item for item in details.formats if item.id == format_id), None)
 
 
 def create_app(
@@ -145,6 +197,27 @@ def create_app(
             raise _http_error(status.HTTP_400_BAD_REQUEST, exc.code, exc.message) from exc
         return _validation_response(payload.url, validated)
 
+    @app.post("/api/media/details", response_model=MediaDetailsResponse)
+    async def media_details(payload: UrlValidationRequest) -> MediaDetailsResponse:
+        try:
+            validated = validate_video_url(payload.url)
+        except UrlValidationError as exc:
+            raise _http_error(status.HTTP_400_BAD_REQUEST, exc.code, exc.message) from exc
+
+        if not validated.supported:
+            raise _http_error(
+                status.HTTP_400_BAD_REQUEST,
+                "unsupported_url",
+                validated.message,
+            )
+
+        try:
+            details, cache_hit = await download_service.inspect(validated)
+        except ExtractionError as exc:
+            raise _extraction_http_error(exc) from exc
+
+        return _details_response(details, cache_hit)
+
     @app.post(
         "/api/downloads",
         response_model=DownloadJob,
@@ -221,6 +294,88 @@ def create_app(
 
         try:
             stream = await open_media_stream(item.media, request.headers.get("range"))
+        except MediaProxyError as exc:
+            raise HTTPException(
+                status_code=exc.status_code,
+                detail={"code": exc.code, "message": exc.message},
+                headers=exc.headers,
+            ) from exc
+
+        return StreamingResponse(
+            stream.iter_chunks(),
+            status_code=stream.status_code,
+            headers=stream.headers,
+            media_type=stream.media_type,
+        )
+
+    @app.get("/api/media/{provider_id}/{media_id}/download")
+    async def download_media_format(
+        provider_id: str,
+        media_id: str,
+        request: Request,
+        format_id: str | None = Query(default=None, alias="format"),
+        source_url: str | None = Query(default=None, alias="url"),
+    ) -> StreamingResponse:
+        if get_provider(provider_id) is None or _MEDIA_ID_PATTERN.fullmatch(media_id) is None:
+            raise _http_error(
+                status.HTTP_404_NOT_FOUND,
+                "media_not_found",
+                "The media file was not found.",
+            )
+
+        details = await download_service.get_cached_details(provider_id, media_id)
+        if details is None and source_url:
+            try:
+                validated = validate_video_url(source_url)
+            except UrlValidationError as exc:
+                raise _http_error(status.HTTP_400_BAD_REQUEST, exc.code, exc.message) from exc
+
+            if (
+                not validated.supported
+                or validated.provider is None
+                or validated.provider.id != provider_id
+                or validated.content_id != media_id
+            ):
+                raise _http_error(
+                    status.HTTP_400_BAD_REQUEST,
+                    "source_url_mismatch",
+                    "The source URL does not match the requested media.",
+                )
+
+            try:
+                details, _ = await download_service.inspect(validated)
+            except ExtractionError as exc:
+                raise _extraction_http_error(exc) from exc
+
+        if details is None:
+            raise _http_error(
+                status.HTTP_404_NOT_FOUND,
+                "media_details_expired",
+                "Media details have expired. Reload the video page.",
+            )
+
+        selected = _selected_format(details, format_id)
+        if selected is None:
+            raise _http_error(
+                status.HTTP_400_BAD_REQUEST,
+                "format_not_found",
+                "The selected resolution is not available.",
+            )
+
+        asset = MediaAsset(
+            id=details.id,
+            provider=details.provider,
+            title=details.title,
+            source_url=details.source_url,
+            media_url=selected.media_url,
+            content_type=selected.content_type,
+            size_bytes=selected.size_bytes,
+            duration_seconds=details.duration_seconds,
+            format_id=selected.id,
+        )
+
+        try:
+            stream = await open_media_stream(asset, request.headers.get("range"))
         except MediaProxyError as exc:
             raise HTTPException(
                 status_code=exc.status_code,

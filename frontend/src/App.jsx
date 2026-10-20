@@ -1,7 +1,5 @@
 import { useEffect, useState } from "react";
 
-const TERMINAL_STATUSES = new Set(["completed", "partial", "failed"]);
-
 async function request(path, options = {}) {
   const response = await fetch(path, {
     ...options,
@@ -30,117 +28,242 @@ async function request(path, options = {}) {
   return body;
 }
 
-function StatusPill({ status }) {
-  return <span className={`status-pill status-${status}`}>{status}</span>;
+function readRoute() {
+  const hash = window.location.hash.replace(/^#/, "");
+  if (hash === "/download" || hash.startsWith("/download?")) {
+    const query = hash.includes("?") ? hash.slice(hash.indexOf("?") + 1) : "";
+    return {
+      name: "download",
+      url: new URLSearchParams(query).get("url") ?? ""
+    };
+  }
+  return { name: "home", url: "" };
 }
 
-function JobResult({ job }) {
-  if (!job) {
+function navigate(path) {
+  window.location.hash = path;
+}
+
+function formatDuration(seconds) {
+  if (typeof seconds !== "number" || !Number.isFinite(seconds)) {
     return null;
   }
-
-  const completed = job.items.filter((item) => item.status === "completed").length;
-
-  return (
-    <section className="panel job-panel" aria-live="polite">
-      <div className="panel-heading">
-        <div>
-          <p className="eyebrow">Batch job</p>
-          <h2>Download queue</h2>
-        </div>
-        <StatusPill status={job.status} />
-      </div>
-
-      <div className="job-summary">
-        <span>{completed} of {job.items.length} ready</span>
-        <code>{job.id}</code>
-      </div>
-
-      <ul className="job-items">
-        {job.items.map((item, index) => (
-          <li className="job-item" key={`${item.url}-${index}`}>
-            <div className="job-item-main">
-              <span className="job-index">{String(index + 1).padStart(2, "0")}</span>
-              <div className="job-item-copy">
-                <p className="job-url">{item.url}</p>
-                <div className="job-meta">
-                  <StatusPill status={item.status} />
-                  {item.cache_hit && <span className="cache-badge">cached</span>}
-                  {item.media?.title && <span>{item.media.title}</span>}
-                </div>
-                {item.error && (
-                  <p className="job-error">
-                    {item.error.message} <code>{item.error.code}</code>
-                  </p>
-                )}
-              </div>
-              {(item.download_url || item.delivery_url) && (
-                <div className="job-actions">
-                  {item.download_url && (
-                    <a className="download-link is-primary" href={item.download_url} download>
-                      Download
-                    </a>
-                  )}
-                  {item.delivery_url && (
-                    <a
-                      className="download-link"
-                      href={item.delivery_url}
-                      target="_blank"
-                      rel="noreferrer"
-                    >
-                      Open media
-                    </a>
-                  )}
-                </div>
-              )}
-            </div>
-          </li>
-        ))}
-      </ul>
-    </section>
-  );
+  const total = Math.max(0, Math.round(seconds));
+  return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
 }
 
-export default function App() {
-  const [url, setUrl] = useState("");
-  const [validation, setValidation] = useState(null);
-  const [validationError, setValidationError] = useState("");
-  const [validating, setValidating] = useState(false);
+function downloadUrl(details, format) {
+  const query = new URLSearchParams({
+    format: format.id,
+    url: details.source_url
+  });
+  return `/api/media/${encodeURIComponent(details.provider)}/${encodeURIComponent(details.id)}/download?${query}`;
+}
 
-  const [batchText, setBatchText] = useState("");
-  const [batchError, setBatchError] = useState("");
-  const [submitting, setSubmitting] = useState(false);
+const RESOLUTION_TIERS = [1080, 720, 360, 240, 144];
 
-  const [job, setJob] = useState(null);
-  const [jobError, setJobError] = useState("");
+function containerLabel(contentType) {
+  if (contentType === "video/mp4") {
+    return "MP4";
+  }
+  return (contentType.split("/")[1] || "video").toUpperCase();
+}
 
-  const jobId = job?.id;
-  const jobStatus = job?.status;
+function resolutionTiers(formats) {
+  const available = formats.filter(
+    (format) => Number.isFinite(format.height) && format.height > 0
+  );
+  if (available.length === 0) {
+    return { tiers: [], maxHeight: null };
+  }
+
+  const sorted = available.sort((left, right) => right.height - left.height);
+  const maxHeight = sorted[0].height;
+  const tiers = RESOLUTION_TIERS.map((target) => {
+    const source =
+      sorted.find((format) => format.height <= target) ?? sorted[sorted.length - 1];
+    return { target, source };
+  });
+
+  return { tiers, maxHeight };
+}
+
+function DownloadPage({ sourceUrl }) {
+  const [details, setDetails] = useState(null);
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [attempt, setAttempt] = useState(0);
 
   useEffect(() => {
-    if (!jobId || TERMINAL_STATUSES.has(jobStatus)) {
+    if (!sourceUrl) {
+      setDetails(null);
+      setError("No video URL was provided.");
+      setLoading(false);
       return undefined;
     }
 
     let cancelled = false;
-    const timer = window.setInterval(async () => {
-      try {
-        const nextJob = await request(`/api/downloads/${jobId}`);
+    setLoading(true);
+    setError("");
+    setDetails(null);
+
+    request("/api/media/details", {
+      method: "POST",
+      body: JSON.stringify({ url: sourceUrl })
+    })
+      .then((result) => {
         if (!cancelled) {
-          setJob(nextJob);
+          setDetails(result);
         }
-      } catch (error) {
+      })
+      .catch((requestError) => {
         if (!cancelled) {
-          setJobError(error.message);
+          setError(requestError.message);
         }
-      }
-    }, 1000);
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setLoading(false);
+        }
+      });
 
     return () => {
       cancelled = true;
-      window.clearInterval(timer);
     };
-  }, [jobId, jobStatus]);
+  }, [sourceUrl, attempt]);
+
+  const duration = formatDuration(details?.duration_seconds);
+  const { tiers, maxHeight } = resolutionTiers(details?.formats ?? []);
+
+  return (
+    <main className="app-shell">
+      <header className="detail-header">
+        <div className="brand">
+          <span className="brand-mark">VS</span>
+          <span>VideoSaver</span>
+        </div>
+        <button className="text-button" type="button" onClick={() => navigate("/")}>
+          Back to validator
+        </button>
+      </header>
+
+      <section className="panel download-panel">
+        <div className="panel-heading">
+          <div>
+            <p className="eyebrow">Video found</p>
+            <h1>Choose a resolution</h1>
+          </div>
+          {details && <span className="provider-chip">{details.provider_name}</span>}
+        </div>
+
+        {loading && (
+          <div className="detail-state" aria-live="polite">
+            <span className="loading-dot" />
+            Fetching video details...
+          </div>
+        )}
+
+        {error && (
+          <div className="detail-state is-error" role="alert">
+            <p>{error}</p>
+            <div className="detail-state-actions">
+              <button
+                className="secondary-button"
+                type="button"
+                onClick={() => setAttempt((value) => value + 1)}
+              >
+                Try again
+              </button>
+              <button className="text-button" type="button" onClick={() => navigate("/")}>
+                Validate another link
+              </button>
+            </div>
+          </div>
+        )}
+
+        {details && (
+          <div className="download-layout">
+            <div className="thumbnail-column">
+              <div className="thumbnail-frame">
+                <span className="thumbnail-fallback">VS</span>
+                {details.thumbnail_url && (
+                  <img
+                    src={details.thumbnail_url}
+                    alt=""
+                    loading="lazy"
+                    referrerPolicy="no-referrer"
+                    onError={(event) => {
+                      event.currentTarget.style.display = "none";
+                    }}
+                  />
+                )}
+              </div>
+
+              <h2 className="video-title">{details.title || "X video"}</h2>
+              <p className="video-meta">
+                {details.provider_name}
+                {duration ? ` · ${duration}` : ""}
+              </p>
+              <a
+                className="source-link"
+                href={details.source_url}
+                target="_blank"
+                rel="noreferrer"
+              >
+                View original post
+              </a>
+            </div>
+
+            <div className="format-column">
+              <p className="eyebrow">Download options</p>
+              {tiers.length > 0 ? (
+                <>
+                  <ul className="format-list">
+                    {tiers.map(({ target, source }) => {
+                      const exact = source.height === target;
+                      return (
+                        <li key={target}>
+                          <a
+                            className={`format-option ${exact ? "" : "is-mapped"}`}
+                            href={downloadUrl(details, source)}
+                            download
+                          >
+                            <span className="format-copy">
+                              <span className="format-quality">{target}P</span>
+                              <span className="format-detail">
+                                {exact ? "Native" : "Source"} {source.height}P ·{" "}
+                                {containerLabel(source.content_type)}
+                              </span>
+                            </span>
+                            <span className="format-action">Download</span>
+                          </a>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                  {maxHeight && (
+                    <p className="resolution-note">
+                      X source max: {maxHeight}P. Tiers without a native match use
+                      the closest source.
+                    </p>
+                  )}
+                </>
+              ) : (
+                <p className="alert">No downloadable resolutions were found.</p>
+              )}
+            </div>
+          </div>
+        )}
+      </section>
+    </main>
+  );
+}
+
+function HomePage() {
+  const [url, setUrl] = useState("");
+  const [validation, setValidation] = useState(null);
+  const [validationError, setValidationError] = useState("");
+  const [validating, setValidating] = useState(false);
 
   async function handleValidate(event) {
     event.preventDefault();
@@ -161,39 +284,10 @@ export default function App() {
     }
   }
 
-  async function queueUrls(urls) {
-    setSubmitting(true);
-    setJobError("");
-    setJob(null);
-
-    try {
-      const queued = await request("/api/downloads", {
-        method: "POST",
-        body: JSON.stringify({ urls })
-      });
-      setJob(queued);
-    } catch (error) {
-      setJobError(error.message);
-    } finally {
-      setSubmitting(false);
+  function handleDownload() {
+    if (validation?.normalized_url) {
+      navigate(`/download?url=${encodeURIComponent(validation.normalized_url)}`);
     }
-  }
-
-  async function handleBatchSubmit(event) {
-    event.preventDefault();
-    setBatchError("");
-
-    const urls = batchText
-      .split(/\r?\n/)
-      .map((entry) => entry.trim())
-      .filter(Boolean);
-
-    if (urls.length === 0) {
-      setBatchError("Add at least one URL.");
-      return;
-    }
-
-    await queueUrls(urls);
   }
 
   return (
@@ -204,10 +298,10 @@ export default function App() {
           <span>VideoSaver</span>
         </div>
         <p className="eyebrow">X video workflow</p>
-        <h1>Validate a link. Queue a batch. Deliver with cache.</h1>
+        <h1>Paste a link. Pick a resolution. Download.</h1>
         <p className="hero-copy">
-          URL parsing and provider detection are enforced on the server. Authorized
-          media results are cached and delivered through your configured CDN.
+          URL parsing and provider detection are enforced on the server. Choose the
+          quality that fits your device before downloading.
         </p>
       </header>
 
@@ -260,12 +354,11 @@ export default function App() {
                 )}
                 {validation.supported && (
                   <button
-                    className="secondary-button"
+                    className="primary-button"
                     type="button"
-                    onClick={() => queueUrls([validation.normalized_url])}
-                    disabled={submitting}
+                    onClick={handleDownload}
                   >
-                    Queue this video
+                    Download
                   </button>
                 )}
               </div>
@@ -274,28 +367,21 @@ export default function App() {
         </div>
 
         <div className="column">
-          {jobError && <p className="alert">{jobError}</p>}
-          <JobResult job={job} />
-
           <section className="panel note-panel">
-            <p className="eyebrow">Delivery controls</p>
-            <h2>Built for scale</h2>
+            <p className="eyebrow">How it works</p>
+            <h2>One link, three steps</h2>
             <ul className="feature-list">
               <li>
-                <strong>Cache</strong>
-                <span>Resolved media is reused by status ID until its TTL expires.</span>
+                <strong>Validate</strong>
+                <span>The server checks the host, status path, and video URL shape.</span>
               </li>
               <li>
-                <strong>Queue</strong>
-                <span>Batch jobs are processed inline and stored in shared state for polling.</span>
+                <strong>Choose quality</strong>
+                <span>Standard tiers map to the closest progressive source X exposes.</span>
               </li>
               <li>
-                <strong>Rate limit</strong>
-                <span>Per-client token buckets return 429 with Retry-After.</span>
-              </li>
-              <li>
-                <strong>CDN</strong>
-                <span>Set CDN_BASE_URL to redirect delivery through a global edge.</span>
+                <strong>Download</strong>
+                <span>The file streams through an attachment endpoint with Range support.</span>
               </li>
             </ul>
             <p className="compliance-note">
@@ -307,4 +393,24 @@ export default function App() {
       </div>
     </main>
   );
+}
+
+export default function App() {
+  const [route, setRoute] = useState(readRoute);
+
+  useEffect(() => {
+    function handleRouteChange() {
+      setRoute(readRoute());
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    }
+
+    window.addEventListener("hashchange", handleRouteChange);
+    return () => window.removeEventListener("hashchange", handleRouteChange);
+  }, []);
+
+  if (route.name === "download") {
+    return <DownloadPage sourceUrl={route.url} />;
+  }
+
+  return <HomePage />;
 }

@@ -6,13 +6,14 @@ from fastapi.testclient import TestClient
 from app import media_proxy
 from app.extraction import UnavailableResolver
 from app.main import create_app
-from app.models import MediaAsset
+from app.models import MediaAsset, MediaDetails, MediaFormat
 from app.settings import Settings
 
 
 class FakeResolver:
     def __init__(self):
         self.calls = 0
+        self.inspect_calls = 0
 
     async def resolve(self, url):
         self.calls += 1
@@ -23,6 +24,37 @@ class FakeResolver:
             source_url=url.normalized_url,
             media_url="https://media.example/video.mp4",
             content_type="video/mp4",
+        )
+
+    async def inspect(self, url):
+        self.inspect_calls += 1
+        return MediaDetails(
+            id=url.content_id,
+            provider=url.provider.id,
+            title="Example video",
+            source_url=url.normalized_url,
+            thumbnail_url="https://media.example/thumb.jpg",
+            duration_seconds=12.5,
+            formats=[
+                MediaFormat(
+                    id="http-720",
+                    label="720p · MP4",
+                    media_url="https://media.example/video-720.mp4",
+                    content_type="video/mp4",
+                    width=1280,
+                    height=720,
+                    size_bytes=1151376,
+                ),
+                MediaFormat(
+                    id="http-360",
+                    label="360p · MP4",
+                    media_url="https://media.example/video-360.mp4",
+                    content_type="video/mp4",
+                    width=640,
+                    height=360,
+                    size_bytes=440232,
+                ),
+            ],
         )
 
 
@@ -326,3 +358,141 @@ def test_download_endpoint_rejects_unknown_index():
 
     assert download.status_code == 404
     assert download.json()["detail"]["code"] == "media_not_found"
+
+
+def test_media_details_endpoint_returns_options_and_caches():
+    resolver = FakeResolver()
+    with TestClient(create_app(_settings(), resolver=resolver)) as client:
+        first = client.post(
+            "/api/media/details",
+            json={"url": "https://x.com/opencode/status/123"},
+        )
+        second = client.post(
+            "/api/media/details",
+            json={"url": "https://x.com/opencode/status/123"},
+        )
+
+    assert first.status_code == 200
+    body = first.json()
+    assert body["provider_name"] == "X (Twitter)"
+    assert body["thumbnail_url"] == "https://media.example/thumb.jpg"
+    assert body["duration_seconds"] == 12.5
+    assert body["cache_hit"] is False
+    assert [item["id"] for item in body["formats"]] == ["http-720", "http-360"]
+    assert body["formats"][0]["label"] == "720p · MP4"
+    assert "media_url" not in body["formats"][0]
+    assert second.json()["cache_hit"] is True
+    assert resolver.inspect_calls == 1
+
+
+def test_format_download_uses_selected_resolution(monkeypatch):
+    seen = {}
+
+    def handler(request):
+        seen["url"] = str(request.url)
+        return httpx.Response(
+            200,
+            headers={"content-type": "video/mp4", "content-length": "4"},
+            stream=AsyncBody(),
+        )
+
+    monkeypatch.setattr(
+        media_proxy,
+        "_build_client",
+        lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+
+    with TestClient(create_app(_settings(), resolver=FakeResolver())) as client:
+        client.post(
+            "/api/media/details",
+            json={"url": "https://x.com/opencode/status/123"},
+        )
+        download = client.get(
+            "/api/media/x/123/download",
+            params={
+                "format": "http-360",
+                "url": "https://x.com/opencode/status/123",
+            },
+        )
+
+    assert download.status_code == 200
+    assert download.content == b"data"
+    assert seen["url"] == "https://media.example/video-360.mp4"
+    assert download.headers["content-disposition"] == 'attachment; filename="x-123-http-360.mp4"'
+
+
+def test_format_download_resolves_when_details_are_missing(monkeypatch):
+    seen = {}
+
+    def handler(request):
+        seen["url"] = str(request.url)
+        return httpx.Response(
+            200,
+            headers={"content-type": "video/mp4", "content-length": "4"},
+            stream=AsyncBody(),
+        )
+
+    monkeypatch.setattr(
+        media_proxy,
+        "_build_client",
+        lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+    resolver = FakeResolver()
+
+    with TestClient(create_app(_settings(), resolver=resolver)) as client:
+        download = client.get(
+            "/api/media/x/123/download",
+            params={
+                "format": "http-720",
+                "url": "https://x.com/opencode/status/123",
+            },
+        )
+
+    assert download.status_code == 200
+    assert seen["url"] == "https://media.example/video-720.mp4"
+    assert resolver.inspect_calls == 1
+
+
+def test_media_details_reports_unavailable_resolver():
+    with TestClient(create_app(_settings(), resolver=UnavailableResolver())) as client:
+        response = client.post(
+            "/api/media/details",
+            json={"url": "https://x.com/opencode/status/123"},
+        )
+
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "extraction_unavailable"
+
+
+def test_media_details_rejects_unsupported_url():
+    with TestClient(create_app(_settings(), resolver=FakeResolver())) as client:
+        response = client.post(
+            "/api/media/details",
+            json={"url": "https://example.com/video/1"},
+        )
+
+    assert response.status_code == 400
+    assert response.json()["detail"]["code"] == "unsupported_url"
+
+
+def test_format_download_returns_not_found_without_cached_details():
+    with TestClient(create_app(_settings(), resolver=FakeResolver())) as client:
+        response = client.get("/api/media/x/123/download")
+
+    assert response.status_code == 404
+    assert response.json()["detail"]["code"] == "media_details_expired"
+
+
+def test_format_download_rejects_unknown_resolution():
+    with TestClient(create_app(_settings(), resolver=FakeResolver())) as client:
+        client.post(
+            "/api/media/details",
+            json={"url": "https://x.com/opencode/status/123"},
+        )
+        download = client.get(
+            "/api/media/x/123/download",
+            params={"format": "missing"},
+        )
+
+    assert download.status_code == 400
+    assert download.json()["detail"]["code"] == "format_not_found"

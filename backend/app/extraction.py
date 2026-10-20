@@ -1,7 +1,7 @@
 import importlib
 from typing import Protocol
 
-from .models import MediaAsset
+from .models import MediaAsset, MediaDetails
 from .url_validation import ValidatedUrl
 
 
@@ -23,9 +23,14 @@ class ExtractionUnavailable(ExtractionError):
 class MediaResolver(Protocol):
     async def resolve(self, url: ValidatedUrl) -> MediaAsset: ...
 
+    async def inspect(self, url: ValidatedUrl) -> MediaDetails: ...
+
 
 class UnavailableResolver:
     async def resolve(self, url: ValidatedUrl) -> MediaAsset:
+        raise ExtractionUnavailable()
+
+    async def inspect(self, url: ValidatedUrl) -> MediaDetails:
         raise ExtractionUnavailable()
 
 

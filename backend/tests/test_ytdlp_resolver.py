@@ -126,6 +126,82 @@ def test_selects_combined_mp4_format(monkeypatch):
     assert asset.size_bytes == 900
 
 
+def test_inspect_reports_thumbnail_and_progressive_resolutions(monkeypatch):
+    _install_fake_ytdlp(
+        monkeypatch,
+        {
+            "title": "Clip",
+            "duration": 12.5,
+            "thumbnail": "https://pbs.twimg.com/thumb.jpg",
+            "formats": [
+                {
+                    "format_id": "hls-audio",
+                    "url": "https://cdn.example/audio.m3u8",
+                    "ext": "mp4",
+                    "protocol": "m3u8_native",
+                    "vcodec": "none",
+                    "height": 0,
+                },
+                {
+                    "format_id": "hls-1080",
+                    "url": "https://cdn.example/video.m3u8",
+                    "ext": "mp4",
+                    "protocol": "m3u8_native",
+                    "vcodec": "avc1",
+                    "height": 1080,
+                },
+                {
+                    "format_id": "http-360",
+                    "url": "https://cdn.example/video-360.mp4",
+                    "ext": "mp4",
+                    "protocol": "https",
+                    "vcodec": None,
+                    "acodec": None,
+                    "width": 640,
+                    "height": 360,
+                    "tbr": 832,
+                    "filesize_approx": 440232,
+                },
+                {
+                    "format_id": "http-720",
+                    "url": "https://cdn.example/video-720.mp4",
+                    "ext": "mp4",
+                    "protocol": "https",
+                    "vcodec": None,
+                    "acodec": None,
+                    "width": 1280,
+                    "height": 720,
+                    "tbr": 2176,
+                    "filesize_approx": 1151376,
+                },
+                {
+                    "format_id": "http-270",
+                    "url": "https://cdn.example/video-270.mp4",
+                    "ext": "mp4",
+                    "protocol": "https",
+                    "vcodec": None,
+                    "acodec": None,
+                    "width": 480,
+                    "height": 270,
+                    "tbr": 256,
+                    "filesize_approx": 135456,
+                },
+            ],
+        },
+    )
+
+    resolver = UnauthenticatedYtdlpResolver()
+    details = asyncio.run(resolver.inspect(_validated_url()))
+
+    assert details.title == "Clip"
+    assert details.thumbnail_url == "https://pbs.twimg.com/thumb.jpg"
+    assert details.duration_seconds == 12.5
+    assert details.source_url == "https://x.com/i/status/2112240443249606785"
+    assert [item.id for item in details.formats] == ["http-720", "http-360", "http-270"]
+    assert details.formats[0].label == "720p · MP4"
+    assert details.formats[0].media_url == "https://cdn.example/video-720.mp4"
+
+
 def test_uses_first_playlist_entry(monkeypatch):
     _install_fake_ytdlp(
         monkeypatch,

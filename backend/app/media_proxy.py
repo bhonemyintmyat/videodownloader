@@ -1,3 +1,4 @@
+import re
 from dataclasses import dataclass
 from ipaddress import ip_address
 from urllib.parse import urlsplit
@@ -112,8 +113,13 @@ def _is_hls(asset: MediaAsset) -> bool:
 
 
 def _filename(asset: MediaAsset) -> str:
+    stem = f"x-{asset.id}"
+    if asset.format_id:
+        suffix = re.sub(r"[^A-Za-z0-9_-]+", "-", asset.format_id).strip("-")[:32]
+        if suffix:
+            stem = f"{stem}-{suffix}"
     extension = _EXTENSIONS.get(asset.content_type, ".mp4")
-    return f"x-{asset.id}{extension}"
+    return f"{stem}{extension}"
 
 
 async def open_media_stream(
