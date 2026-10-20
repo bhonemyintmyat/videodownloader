@@ -76,6 +76,9 @@ class DownloadService:
             parsed_urls.append(submitted.parsed)
 
         await self._process(job, parsed_urls)
+        for index, item in enumerate(job.items):
+            if item.status == DownloadItemStatus.COMPLETED and item.media is not None:
+                item.download_url = f"/api/downloads/{job.id}/items/{index}/download"
         await self._state.job_save(
             job.id,
             job.model_dump_json(),

@@ -1,7 +1,9 @@
 import time
 
+import httpx
 from fastapi.testclient import TestClient
 
+from app import media_proxy
 from app.extraction import UnavailableResolver
 from app.main import create_app
 from app.models import MediaAsset
@@ -209,3 +211,118 @@ def test_cache_miss_for_unknown_media():
 
     assert response.status_code == 404
     assert response.json()["detail"]["code"] == "media_not_found"
+
+
+class AsyncBody(httpx.AsyncByteStream):
+    async def __aiter__(self):
+        yield b"data"
+
+
+def test_download_endpoint_streams_attachment_and_forwards_range(monkeypatch):
+    seen = {}
+
+    def handler(request):
+        seen["url"] = str(request.url)
+        seen["range"] = request.headers.get("range")
+        return httpx.Response(
+            206,
+            headers={
+                "accept-ranges": "bytes",
+                "content-length": "4",
+                "content-range": "bytes 0-3/10",
+                "content-type": "video/mp4",
+            },
+            stream=AsyncBody(),
+        )
+
+    monkeypatch.setattr(
+        media_proxy,
+        "_build_client",
+        lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+
+    with TestClient(create_app(_settings(), resolver=FakeResolver())) as client:
+        response = client.post(
+            "/api/downloads",
+            json={"urls": ["https://x.com/opencode/status/123"]},
+        )
+        job = _wait_for_job(client, response.json()["id"])
+        assert job["items"][0]["download_url"] == (
+            f"/api/downloads/{job['id']}/items/0/download"
+        )
+
+        download = client.get(job["items"][0]["download_url"], headers={"Range": "bytes=0-3"})
+
+    assert download.status_code == 206
+    assert download.content == b"data"
+    assert download.headers["content-disposition"] == 'attachment; filename="x-123.mp4"'
+    assert download.headers["content-range"] == "bytes 0-3/10"
+    assert seen == {
+        "url": "https://media.example/video.mp4",
+        "range": "bytes=0-3",
+    }
+
+
+def test_download_endpoint_rejects_private_media_source():
+    class PrivateResolver(FakeResolver):
+        async def resolve(self, url):
+            asset = await super().resolve(url)
+            return asset.model_copy(update={"media_url": "http://127.0.0.1/video.mp4"})
+
+    with TestClient(create_app(_settings(), resolver=PrivateResolver())) as client:
+        response = client.post(
+            "/api/downloads",
+            json={"urls": ["https://x.com/opencode/status/111"]},
+        )
+        job = _wait_for_job(client, response.json()["id"])
+        download = client.get(job["items"][0]["download_url"])
+
+    assert download.status_code == 502
+    assert download.json()["detail"]["code"] == "media_source_invalid"
+
+
+def test_download_endpoint_maps_upstream_failure(monkeypatch):
+    monkeypatch.setattr(
+        media_proxy,
+        "_build_client",
+        lambda: httpx.AsyncClient(
+            transport=httpx.MockTransport(lambda request: httpx.Response(404))
+        ),
+    )
+
+    with TestClient(create_app(_settings(), resolver=FakeResolver())) as client:
+        response = client.post(
+            "/api/downloads",
+            json={"urls": ["https://x.com/opencode/status/321"]},
+        )
+        job = _wait_for_job(client, response.json()["id"])
+        download = client.get(job["items"][0]["download_url"])
+
+    assert download.status_code == 502
+    assert download.json()["detail"]["code"] == "media_source_unavailable"
+
+
+def test_download_endpoint_requires_completed_media():
+    with TestClient(create_app(_settings(), resolver=UnavailableResolver())) as client:
+        response = client.post(
+            "/api/downloads",
+            json={"urls": ["https://x.com/opencode/status/654"]},
+        )
+        job = _wait_for_job(client, response.json()["id"])
+        download = client.get(f"/api/downloads/{job['id']}/items/0/download")
+
+    assert download.status_code == 409
+    assert download.json()["detail"]["code"] == "media_not_ready"
+
+
+def test_download_endpoint_rejects_unknown_index():
+    with TestClient(create_app(_settings(), resolver=FakeResolver())) as client:
+        response = client.post(
+            "/api/downloads",
+            json={"urls": ["https://x.com/opencode/status/987"]},
+        )
+        job = _wait_for_job(client, response.json()["id"])
+        download = client.get(f"/api/downloads/{job['id']}/items/4/download")
+
+    assert download.status_code == 404
+    assert download.json()["detail"]["code"] == "media_not_found"

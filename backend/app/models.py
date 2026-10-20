@@ -57,6 +57,7 @@ class DownloadItem(BaseModel):
     status: DownloadItemStatus = DownloadItemStatus.QUEUED
     media: MediaAsset | None = None
     delivery_url: str | None = None
+    download_url: str | None = None
     cache_hit: bool = False
     error: ErrorDetail | None = None
 

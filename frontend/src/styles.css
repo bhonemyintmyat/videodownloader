@@ -391,16 +391,28 @@ button:disabled {
   color: #fb7185;
 }
 
-.download-link {
+.job-actions {
   align-self: center;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.download-link {
   border: 1px solid rgba(110, 231, 183, 0.28);
   border-radius: 10px;
   padding: 8px 11px;
   color: var(--accent);
+  text-align: center;
   text-decoration: none;
   white-space: nowrap;
   font-size: 0.78rem;
   font-weight: 700;
+}
+
+.download-link.is-primary {
+  background: rgba(16, 185, 129, 0.16);
+  color: #d1fae5;
 }
 
 .download-link:hover {
@@ -477,8 +489,9 @@ button:disabled {
     grid-template-columns: auto minmax(0, 1fr);
   }
 
-  .download-link {
+  .job-actions {
     grid-column: 2;
     justify-self: start;
+    align-items: stretch;
   }
 }

@@ -74,15 +74,24 @@ function JobResult({ job }) {
                   </p>
                 )}
               </div>
-              {item.delivery_url && (
-                <a
-                  className="download-link"
-                  href={item.delivery_url}
-                  target="_blank"
-                  rel="noreferrer"
-                >
-                  Open media
-                </a>
+              {(item.download_url || item.delivery_url) && (
+                <div className="job-actions">
+                  {item.download_url && (
+                    <a className="download-link is-primary" href={item.download_url} download>
+                      Download
+                    </a>
+                  )}
+                  {item.delivery_url && (
+                    <a
+                      className="download-link"
+                      href={item.delivery_url}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      Open media
+                    </a>
+                  )}
+                </div>
               )}
             </div>
           </li>

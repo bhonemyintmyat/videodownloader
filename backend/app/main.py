@@ -3,12 +3,14 @@ from contextlib import asynccontextmanager
 from ipaddress import ip_address
 
 from fastapi import FastAPI, HTTPException, Request, status
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 
 from .delivery import build_delivery_url
 from .extraction import MediaResolver, UnavailableResolver, load_resolver
 from .jobs import DownloadService, SubmittedUrl
+from .media_proxy import MediaProxyError, open_media_stream
 from .models import (
+    DownloadItemStatus,
     DownloadJob,
     DownloadRequest,
     ErrorDetail,
@@ -191,6 +193,47 @@ def create_app(
                 "The download job was not found.",
             )
         return job
+
+    @app.get("/api/downloads/{job_id}/items/{item_index}/download")
+    async def download_media(job_id: str, item_index: int, request: Request) -> StreamingResponse:
+        job = await download_service.get(job_id)
+        if job is None:
+            raise _http_error(
+                status.HTTP_404_NOT_FOUND,
+                "job_not_found",
+                "The download job was not found.",
+            )
+
+        if item_index < 0 or item_index >= len(job.items):
+            raise _http_error(
+                status.HTTP_404_NOT_FOUND,
+                "media_not_found",
+                "The media file was not found.",
+            )
+
+        item = job.items[item_index]
+        if item.status != DownloadItemStatus.COMPLETED or item.media is None:
+            raise _http_error(
+                status.HTTP_409_CONFLICT,
+                "media_not_ready",
+                "The media is not ready for download.",
+            )
+
+        try:
+            stream = await open_media_stream(item.media, request.headers.get("range"))
+        except MediaProxyError as exc:
+            raise HTTPException(
+                status_code=exc.status_code,
+                detail={"code": exc.code, "message": exc.message},
+                headers=exc.headers,
+            ) from exc
+
+        return StreamingResponse(
+            stream.iter_chunks(),
+            status_code=stream.status_code,
+            headers=stream.headers,
+            media_type=stream.media_type,
+        )
 
     @app.get("/api/media/{provider_id}/{media_id}", status_code=status.HTTP_307_TEMPORARY_REDIRECT)
     async def deliver_media(provider_id: str, media_id: str) -> RedirectResponse:
