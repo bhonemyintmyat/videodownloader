@@ -44,7 +44,7 @@ PROVIDERS = (X_PROVIDER,)
 _PROVIDERS_BY_ID = {provider.id: provider for provider in PROVIDERS}
 _STATUS_PATH = re.compile(
     r"^/(?:(?:[A-Za-z0-9_]{1,15}/status(?:es)?)|(?:i/status)|(?:i/web/status))"
-    r"/(?P<content_id>[0-9]{1,25})/?$"
+    r"/(?P<content_id>[0-9]{1,25})(?:/video/[0-9]{1,3})?/?$"
 )
 
 

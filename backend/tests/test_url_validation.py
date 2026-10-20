@@ -75,6 +75,24 @@ def test_deceptive_hostnames_are_not_treated_as_x(url):
     assert result.provider is None
 
 
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://x.com/immasiddx/status/2112240443249606785/video/1",
+        "https://twitter.com/immasiddx/status/2112240443249606785/video/1?t=abc",
+        "https://mobile.x.com/immasiddx/status/2112240443249606785/video/1/",
+        "https://x.com/i/status/2112240443249606785/video/1",
+        "https://x.com/i/web/status/2112240443249606785/video/1",
+    ],
+)
+def test_accepts_x_video_path_variants(url):
+    result = validate_video_url(url)
+
+    assert result.supported is True
+    assert result.content_id == "2112240443249606785"
+    assert result.normalized_url == "https://x.com/i/status/2112240443249606785"
+
+
 def test_x_non_status_url_is_identified_but_not_supported():
     result = validate_video_url("https://x.com/opencode")
 
@@ -91,6 +109,8 @@ def test_x_non_status_url_is_identified_but_not_supported():
         "https://x.com/opencode/status/not-a-number",
         "https://x.com/opencode/status/",
         "https://x.com/opencode/status/123/extra",
+        "https://x.com/opencode/status/123/video/abc",
+        "https://x.com/opencode/status/123/video/1/extra",
         "https://x.com/this_username_is_too_long/status/123",
     ],
 )
